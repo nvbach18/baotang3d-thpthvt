@@ -3,94 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#21150f">
-  <title>Tải bảo tàng ảo để sử dụng offline</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      font-family: "Segoe UI", Arial, sans-serif;
-      background: #21150f;
-      color: #f7ecdb;
-    }
-    * { box-sizing: border-box; }
-    body {
-      min-height: 100vh;
-      margin: 0;
-      display: grid;
-      place-items: center;
-      padding: 28px 16px;
-      background:
-        radial-gradient(ellipse at 50% 0, rgba(163, 105, 54, .3), transparent 58%),
-        linear-gradient(145deg, #21150f, #392317 58%, #17100c);
-    }
-    main { width: min(760px, 100%); }
-    .card {
-      padding: clamp(26px, 6vw, 54px);
-      border: 1px solid rgba(226, 190, 129, .35);
-      border-radius: 22px;
-      background: rgba(26, 18, 13, .86);
-      box-shadow: 0 24px 80px #100a0780;
-    }
-    .eyebrow {
-      margin: 0 0 12px;
-      color: #e1b875;
-      font-size: .82rem;
-      font-weight: 700;
-      letter-spacing: .13em;
-      text-transform: uppercase;
-    }
-    h1 { margin: 0; font-family: Georgia, serif; font-size: clamp(2rem, 6vw, 3.4rem); line-height: 1.12; }
-    .lead { margin: 20px 0 26px; color: #dfd1bd; font-size: 1.08rem; line-height: 1.7; }
-    .actions { display: flex; flex-wrap: wrap; gap: 12px; }
-    .button {
-      min-height: 48px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      padding: 12px 19px;
-      border: 1px solid #d5ad70;
-      border-radius: 10px;
-      background: #a56d31;
-      color: #fff8ec;
-      font: inherit;
-      font-weight: 700;
-      text-decoration: none;
-    }
-    .button:hover { background: #bd8240; }
-    .button.secondary { background: transparent; }
-    .button:focus-visible { outline: 3px solid #f3d7a5; outline-offset: 3px; }
-    .steps { margin: 30px 0 0; padding-left: 22px; color: #dfd1bd; line-height: 1.8; }
-    .steps strong { color: #fff3df; }
-    .note {
-      margin: 24px 0 0;
-      padding: 14px 16px;
-      border-left: 3px solid #d5ad70;
-      background: #ffffff0a;
-      color: #d1c1ac;
-      font-size: .94rem;
-      line-height: 1.6;
-    }
-    footer { margin-top: 18px; color: #ae9c86; font-size: .82rem; text-align: center; }
-  </style>
+  <meta http-equiv="refresh" content="0; url=./museum-fixed.html">
+  <title>Bảo tàng ảo - THPT Hoàng Văn Thụ</title>
 </head>
 <body>
-  <main>
-    <section class="card" aria-labelledby="page-title">
-      <p class="eyebrow">Bảo tàng ảo · Bản chạy offline</p>
-      <h1 id="page-title">Mang bảo tàng về máy của bạn</h1>
-      <p class="lead">Tải một gói ZIP gồm trang bảo tàng, thư viện 3D, mô hình, video và công cụ chạy trên Windows. Giải nén một lần, sau đó có thể tham quan mà không cần tải lại dữ liệu từ Internet.</p>
-      <div class="actions">
-        <a class="button" href="./bao-tang-ao-3d-offline.zip" download>Tải toàn bộ dữ liệu (ZIP)</a>
-        <a class="button secondary" href="./museum-fixed.html">Tham quan trực tuyến</a>
-      </div>
-      <ol class="steps">
-        <li>Tải ZIP và giải nén toàn bộ vào một thư mục trên máy.</li>
-        <li>Mở thư mục vừa giải nén, nhấp đúp <strong>run-local.bat</strong>.</li>
-        <li>Trang bảo tàng sẽ tự mở; giữ cửa sổ máy chủ đang chạy trong lúc tham quan.</li>
-      </ol>
-      <p class="note"><strong>Lưu ý:</strong> chạy offline giúp giảm thời gian tải và tránh phụ thuộc mạng; nếu hình ảnh vẫn khựng khi đã tải xong, nguyên nhân thường là hiệu năng dựng cảnh 3D của thiết bị và việc tải gói về máy không tự làm tăng FPS.</p>
-    </section>
-    <footer>Gói offline bao gồm mô hình, video và thư viện cần thiết để mở bảo tàng cục bộ.</footer>
-  </main>
+  <p>Đang mở bảo tàng ảo. Nếu trang không tự chuyển, <a href="./museum-fixed.html">nhấn vào đây</a>.</p>
 </body>
 </html>
