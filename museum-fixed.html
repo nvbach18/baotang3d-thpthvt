@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bảo tàng ảo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;500;600&family=Playfair+Display:ital,wght@0,500;0,700;1,500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="museum-fixed.css">
+</head>
+<body data-view="entry">
+<script id="seed" type="application/json">null</script>
+
+<div id="app">
+  <!-- Thanh điều khiển -->
+  <div class="topbar" id="topbar">
+    <button class="brand" id="brand" title="Về sảnh chính">🏛 <span id="brandTxt"></span></button>
+    <div class="tourgrp" id="tourIdle"><button class="btn primary" id="tourStart">▶ Tham quan tự động</button></div>
+    <div class="tourgrp" id="tourRun" hidden>
+      <button class="btn" id="tPrev" title="Hiện vật trước">⏮</button>
+      <button class="btn" id="tPause">⏸ Tạm dừng</button>
+      <button class="btn" id="tNext" title="Hiện vật sau">⏭</button>
+      <button class="btn" id="tStop">⏹ Dừng</button>
+      <span class="small" id="tProg"></span>
+    </div>
+    <button class="btn" id="voiceBtn"></button>
+    <label>Chuyển cảnh <select id="fxSel"></select></label>
+    <button class="btn" id="edBtn">⚙ Quản lý</button>
+  </div>
+
+  <!-- Cổng vào -->
+  <section class="view active" id="entry">
+    <div class="arch">
+      <p class="eyebrow" id="entryEye"></p>
+      <h1 id="entryTitle"></h1>
+      <p class="sub" id="entrySub"></p>
+      <div class="entry-btns">
+        <button class="btn primary" id="enterBtn">Bước vào bảo tàng</button>
+        <button class="btn" id="entryTour">▶ Tham quan tự động</button>
+      </div>
+      <button class="btn sm" id="entryEd">⚙ Quản lý bảo tàng</button>
+    </div>
+  </section>
+
+  <!-- Sảnh chính -->
+  <section class="view" id="hall">
+    <div class="hall-head">
+      <p class="eyebrow" id="hallEye"></p>
+      <h1 id="hallWar"></h1>
+      <p class="sub" id="hallSub"></p>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div id="hallBody"></div>
+  </section>
+
+  <!-- Phòng trưng bày -->
+  <section class="view" id="room"></section>
+</div>
+
+<div id="caption"><span class="lab">Thuyết minh</span><p id="capText"></p></div>
+<div id="toast" role="status"></div>
+<div id="lightbox" hidden></div>
+<div id="fx" hidden></div>
+
+<div id="editor" hidden>
+  <div class="ed-panel" role="dialog" aria-label="Quản lý bảo tàng">
+    <header>
+      <h2>Quản lý bảo tàng</h2>
+      <nav class="tabs">
+        <button class="chip on" data-tab="items">Hiện vật</button>
+        <button class="chip" data-tab="museum">Bảo tàng và kịch bản</button>
+        <button class="chip" data-tab="resources">Tải tài liệu</button>
+        <button class="chip" data-tab="data">Lưu và chia sẻ</button>
+      </nav>
+      <button class="btn" id="edClose">Xong, đóng lại</button>
+    </header>
+    <div id="edBody"></div>
+  </div>
+</div>
+
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.159.0/three.min.js"></script>
+<script defer src="museum-fixed.js"></script>
+</body>
+</html>
