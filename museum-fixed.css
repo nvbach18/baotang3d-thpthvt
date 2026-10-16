@@ -328,3 +328,5 @@ body[data-view=walk3d] .topbar{display:none!important}
 .walk-video-list { margin: 18px 0; }
 .walk-video-list video { display:block; }
 .walk-video-list .walk-popup-video { width:100%; max-height:42vh; aspect-ratio:16/9; object-fit:contain; background:#000; border-radius:8px; }
+.walk-media { position:fixed; left:-2px; top:-2px; width:1px; height:1px; overflow:hidden; opacity:0; pointer-events:none; z-index:-1; }
+.walk-media video { display:block; width:1px; height:1px; }
