@@ -1,12 +1,127 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="vi">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="0; url=./museum-fixed.html">
-  <title>Bảo tàng ảo - THPT Hoàng Văn Thụ</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bảo tàng ảo Tây Sơn</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,500;1,700&subset=vietnamese&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="museum-fixed.css">
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.159.0/build/three.module.js"}}
+</script>
 </head>
-<body>
-  <p>Đang mở bảo tàng ảo. Nếu trang không tự chuyển, <a href="./museum-fixed.html">nhấn vào đây</a>.</p>
+<body data-view="entry">
+<script id="seed" type="application/json">null</script>
+
+<div id="app">
+  <!-- Thanh điều khiển -->
+  <div class="topbar" id="topbar">
+    <button class="brand" id="brand" title="Về sảnh chính">🏛 <span id="brandTxt"></span></button>
+    <div class="tourgrp" id="tourIdle"><button class="btn primary" id="tourStart">▶ Tham quan tự động</button></div>
+    <div class="tourgrp" id="tourRun" hidden>
+      <button class="btn" id="tPrev" title="Hiện vật trước">⏮</button>
+      <button class="btn" id="tPause">⏸ Tạm dừng</button>
+      <button class="btn" id="tNext" title="Hiện vật sau">⏭</button>
+      <button class="btn" id="tStop">⏹ Dừng</button>
+      <span class="small" id="tProg"></span>
+    </div>
+    <button class="btn" id="voiceBtn"></button>
+    <label>Chuyển cảnh <select id="fxSel"></select></label>
+    <button class="btn" id="settingsBtn" type="button">⚙ Cài đặt</button>
+    <button class="btn" id="edBtn">⚙ Quản lý</button>
+  </div>
+
+  <!-- Cổng vào -->
+  <section class="view active" id="entry">
+    <div class="arch">
+      <p class="eyebrow" id="entryEye"></p>
+      <h1 id="entryTitle"></h1>
+      <p class="sub" id="entrySub"></p>
+      <div class="entry-btns">
+        <button class="btn primary" id="enterBtn">Bước vào bảo tàng</button>
+        <button class="btn" id="entryTour">▶ Tham quan tự động</button>
+        <button class="btn" id="entrySettings" type="button">⚙ Cài đặt</button>
+      </div>
+      <button class="btn sm" id="entryEd">⚙ Quản lý bảo tàng</button>
+    </div>
+  </section>
+
+  <!-- Sảnh chính -->
+  <section class="view" id="hall">
+    <div class="hall-head">
+      <p class="eyebrow" id="hallEye"></p>
+      <h1 id="hallWar"></h1>
+      <p class="sub" id="hallSub"></p>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div id="hallBody"></div>
+  </section>
+
+  <!-- Phòng trưng bày -->
+  <section class="view" id="room"></section>
+</div>
+
+<div id="caption"><span class="lab">Thuyết minh</span><p id="capText"></p></div>
+<div id="toast" role="status"></div>
+<div id="lightbox" hidden></div>
+<div id="fx" hidden></div>
+
+<div id="settings" hidden>
+  <div class="settings-backdrop" data-settings-close></div>
+  <section class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <header>
+      <h2 id="settingsTitle">Cài đặt</h2>
+      <button class="btn" id="settingsClose" type="button">Đóng</button>
+    </header>
+    <div class="settings-body">
+      <div class="fld">
+        <label id="settingsLanguageLabel" for="settingsLanguage">Ngôn ngữ</label>
+        <select id="settingsLanguage">
+          <option value="vi">Tiếng Việt</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+      <div class="fld">
+        <label id="settingsGraphicsLabel" for="settingsGraphics">Độ phân giải đồ họa 3D</label>
+        <select id="settingsGraphics">
+          <option value="balanced">Cân bằng · tối đa 1,25×</option>
+          <option value="high">Cao · tối đa 1,5×</option>
+          <option value="ultra">Siêu nét · tối đa 2×</option>
+          <option value="device">Theo màn hình · độ phân giải gốc</option>
+        </select>
+        <p class="small" id="settingsGraphicsHint">Khử răng cưa và bóng đổ luôn bật. Độ phân giải cao hơn có thể ảnh hưởng tốc độ trên thiết bị yếu.</p>
+      </div>
+      <div class="fld">
+        <label id="settingsVolumeLabel" for="settingsVolume">Âm lượng <output id="settingsVolumeValue">80%</output></label>
+        <input id="settingsVolume" type="range" min="0" max="100" step="1" value="80">
+      </div>
+      <div class="fld settings-check">
+        <label for="settingsNarration"><input id="settingsNarration" type="checkbox"> Bật thuyết minh bằng giọng nói</label>
+      </div>
+      <p class="help" id="settingsLanguageHint">Ngôn ngữ áp dụng cho bảng cài đặt và một số nút; tên, mô tả, thuyết minh hiện vật giữ nguyên ngôn ngữ gốc.</p>
+      <p class="small settings-shortcut" id="settingsShortcut">Nhấn Esc để mở hoặc đóng bảng cài đặt.</p>
+    </div>
+  </section>
+</div>
+
+<div id="editor" hidden>
+  <div class="ed-panel" role="dialog" aria-label="Quản lý bảo tàng">
+    <header>
+      <h2>Quản lý bảo tàng</h2>
+      <nav class="tabs">
+        <button class="chip on" data-tab="items">Hiện vật</button>
+        <button class="chip" data-tab="museum">Bảo tàng và kịch bản</button>
+        <button class="chip" data-tab="resources">Tải tài liệu</button>
+        <button class="chip" data-tab="data">Lưu và chia sẻ</button>
+      </nav>
+      <div class="ed-head-actions"><span id="saveStatus" role="status"></span><button class="btn primary" id="saveNow" title="Lưu thay đổi vào museum-data.json hoặc tải file JSON xuống">💾 Lưu ngay</button><button class="btn" id="edClose">Xong, đóng lại</button></div>
+    </header>
+    <div id="edBody"></div>
+  </div>
+</div>
+
+<script defer src="museum-fixed.js" onerror="document.querySelector('#toast').textContent='Không tải được mã bảo tàng. Hãy kiểm tra kết nối và tải lại trang.';document.querySelector('#toast').classList.add('show')"></script>
 </body>
 </html>
