@@ -6,6 +6,7 @@ $root = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $rootPrefix = $root.TrimEnd('\') + '\'
 $port = 8000
 $url = "http://127.0.0.1:$port/"
+$compressedModelCache = @{}
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add($url)
 
@@ -13,6 +14,7 @@ $contentTypes = @{
   '.html' = 'text/html; charset=utf-8'
   '.css' = 'text/css; charset=utf-8'
   '.js' = 'text/javascript; charset=utf-8'
+  '.mjs' = 'text/javascript; charset=utf-8'
   '.json' = 'application/json; charset=utf-8'
   '.svg' = 'image/svg+xml'
   '.png' = 'image/png'
@@ -70,44 +72,75 @@ try {
         $start = 0L
         $end = $file.Length - 1
         $rangeHeader = $context.Request.Headers['Range']
-        if ($rangeHeader -and $rangeHeader -match '^bytes=(\d*)-(\d*)$') {
-          $rangeStart = $Matches[1]
-          $rangeEnd = $Matches[2]
-          if (-not $rangeStart -and $rangeEnd) {
-            $start = [Math]::Max(0, $file.Length - [long]$rangeEnd)
-          } elseif ($rangeStart) {
-            $start = [long]$Matches[1]
-            if ($rangeEnd) {
-              $end = [long]$rangeEnd
+        $acceptsGzip = $context.Request.Headers['Accept-Encoding'] -match '(^|,)\s*gzip(?:\s*;|\s*,|$)'
+        if ($file.Extension -eq '.glb' -and $acceptsGzip -and -not $rangeHeader) {
+          $cacheKey = $file.FullName
+          $cachedModel = $compressedModelCache[$cacheKey]
+          if (-not $cachedModel -or $cachedModel.Length -ne $file.Length -or $cachedModel.LastWriteTimeUtc -ne $file.LastWriteTimeUtc) {
+            $sourceStream = [System.IO.File]::OpenRead($filePath)
+            $compressedStream = New-Object System.IO.MemoryStream
+            $gzipStream = New-Object System.IO.Compression.GzipStream($compressedStream, [System.IO.Compression.CompressionLevel]::Fastest)
+            try {
+              $sourceStream.CopyTo($gzipStream)
+            } finally {
+              $gzipStream.Dispose()
+              $sourceStream.Dispose()
             }
+            $compressedModelCache[$cacheKey] = @{
+              Length = $file.Length
+              LastWriteTimeUtc = $file.LastWriteTimeUtc
+              Bytes = $compressedStream.ToArray()
+            }
+            $compressedStream.Dispose()
+            $cachedModel = $compressedModelCache[$cacheKey]
           }
 
-          if ($start -gt $end -or $start -ge $file.Length) {
-            $response.StatusCode = 416
-            $response.Headers['Content-Range'] = "bytes */$($file.Length)"
-          } else {
-            $end = [Math]::Min($end, $file.Length - 1)
-            $response.StatusCode = 206
-            $response.Headers['Content-Range'] = "bytes $start-$end/$($file.Length)"
-            $response.ContentLength64 = $end - $start + 1
+          $response.Headers['Content-Encoding'] = 'gzip'
+          $response.Headers['Vary'] = 'Accept-Encoding'
+          $response.ContentLength64 = $cachedModel.Bytes.Length
+          if ($context.Request.HttpMethod -ne 'HEAD') {
+            $response.OutputStream.Write($cachedModel.Bytes, 0, $cachedModel.Bytes.Length)
           }
         } else {
-          $response.ContentLength64 = $file.Length
-        }
-
-        if ($response.StatusCode -ne 416 -and $context.Request.HttpMethod -ne 'HEAD') {
-          $stream = [System.IO.File]::OpenRead($filePath)
-          [void]$stream.Seek($start, [System.IO.SeekOrigin]::Begin)
-          $buffer = New-Object byte[] 65536
-          $remaining = $response.ContentLength64
-          while ($remaining -gt 0) {
-            $count = [Math]::Min($buffer.Length, $remaining)
-            $read = $stream.Read($buffer, 0, [int]$count)
-            if ($read -le 0) {
-              break
+          if ($rangeHeader -and $rangeHeader -match '^bytes=(\d*)-(\d*)$') {
+            $rangeStart = $Matches[1]
+            $rangeEnd = $Matches[2]
+            if (-not $rangeStart -and $rangeEnd) {
+              $start = [Math]::Max(0, $file.Length - [long]$rangeEnd)
+            } elseif ($rangeStart) {
+              $start = [long]$rangeStart
+              if ($rangeEnd) {
+                $end = [long]$rangeEnd
+              }
             }
-            $response.OutputStream.Write($buffer, 0, $read)
-            $remaining -= $read
+
+            if ($start -gt $end -or $start -ge $file.Length) {
+              $response.StatusCode = 416
+              $response.Headers['Content-Range'] = "bytes */$($file.Length)"
+            } else {
+              $end = [Math]::Min($end, $file.Length - 1)
+              $response.StatusCode = 206
+              $response.Headers['Content-Range'] = "bytes $start-$end/$($file.Length)"
+              $response.ContentLength64 = $end - $start + 1
+            }
+          } else {
+            $response.ContentLength64 = $file.Length
+          }
+
+          if ($response.StatusCode -ne 416 -and $context.Request.HttpMethod -ne 'HEAD') {
+            $stream = [System.IO.File]::OpenRead($filePath)
+            [void]$stream.Seek($start, [System.IO.SeekOrigin]::Begin)
+            $buffer = New-Object byte[] 65536
+            $remaining = $response.ContentLength64
+            while ($remaining -gt 0) {
+              $count = [Math]::Min($buffer.Length, $remaining)
+              $read = $stream.Read($buffer, 0, [int]$count)
+              if ($read -le 0) {
+                break
+              }
+              $response.OutputStream.Write($buffer, 0, $read)
+              $remaining -= $read
+            }
           }
         }
       }

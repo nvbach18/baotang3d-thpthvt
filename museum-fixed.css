@@ -273,6 +273,7 @@ body[data-view=walk3d] .topbar{display:none!important}
 .walk-detail .body p{margin:0 0 11px}
 .walk-detail .mini-art{width:100%;height:220px;max-height:240px;overflow:hidden;display:grid;place-items:center;margin:12px 0 16px;border:1px solid var(--line);background:#110b09;border-radius:8px}.walk-detail .mini-art .art{width:100%;height:100%;display:grid;place-items:center}.walk-detail .mini-art .art svg,.walk-detail .mini-art .art img{width:100%;height:100%;object-fit:contain}
 .walk-detail .mini-art svg,.walk-detail .mini-art img{display:block;max-width:100%;max-height:230px;object-fit:contain}
+.walk-detail .walk-image-error{padding:12px;color:#ddcfb5;font-size:.84rem;overflow-wrap:anywhere}
 .walk-detail .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}
 .walk-detail .actions button{border:1px solid var(--line);border-radius:999px;background:#2a1a14;padding:8px 12px;font-size:.84rem;color:#f2e9d4}
 .walk-detail .actions button.primary{background:linear-gradient(#ecd08c,#b88a3e);color:#2a1a08;border-color:#ecd08c;font-weight:600}
@@ -367,7 +368,6 @@ body[data-view=walk3d] .topbar{display:none!important}
 .walk-active-video{display:grid;place-items:center;width:100%;min-height:180px;margin:12px 0;background:#000;border:1px solid rgba(230,196,122,.4);border-radius:10px;overflow:hidden}
 .walk-active-video video{display:block;width:100%;max-height:52vh;object-fit:contain;background:#000}
 .walk-video-error{margin:8px 0;padding:9px 12px;border:1px solid rgba(255,145,120,.55);border-radius:8px;background:rgba(120,35,25,.3);color:#ffe0d8;font-size:.84rem}
-.walk-orientation{display:none}
 @media(max-width:760px),(max-height:500px) and (orientation:landscape){
   .walk-mobile{position:absolute;left:20px;bottom:20px;display:block;width:152px;height:152px;touch-action:none;user-select:none;-webkit-user-select:none}
   .walk-interact{display:block}
@@ -378,9 +378,9 @@ body[data-view=walk3d] .topbar{display:none!important}
   .walk-interact{right:20px;bottom:34px}
   .walk-active-video video{max-height:56vh}
 }
-@media(max-width:760px) and (orientation:portrait){
-  #walk3d:not([hidden]) .walk-orientation{position:absolute;inset:0;z-index:20;display:grid;align-content:center;justify-items:center;gap:12px;padding:28px;text-align:center;background:rgba(9,7,6,.97);color:#f2e9d4}
-  .walk-orientation-icon{font-size:3rem;color:var(--brass-2)}
-  .walk-orientation h2{font:500 clamp(1.5rem,6vw,2.1rem) var(--serif);color:var(--brass-2)}
-  .walk-orientation p{max-width:36ch;color:#ddcfb5}
+@media (max-width:760px) and (orientation:landscape),(max-height:500px) and (orientation:landscape){
+  .walk-help{display:none}
+  .walk-interact{right:14px;bottom:66px}
+  .walk-status{right:14px;bottom:10px}
+  .walk-prompt{left:50%;bottom:8px;width:min(54vw,430px);max-width:calc(100vw - 300px);padding:5px 10px;font-size:.68rem;line-height:1.25}
 }

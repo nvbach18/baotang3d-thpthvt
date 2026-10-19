@@ -1,18 +1,51 @@
 (async()=>{
 'use strict';
-let STATIC_DATA=null,DATA_LOAD_ERROR=null,DATA_FILE_HANDLE=null;
+let STATIC_DATA=null,DATA_LOAD_ERROR=null,DRIVE_LOAD_ERROR=null,DATA_FILE_HANDLE=null,DRIVE_DATA_FILE_ID=null;
+let DRIVE_CONFIG={clientId:'',apiKey:'',folderId:''};
 const seedElement=document.querySelector('#seed');
 if(seedElement&&seedElement.textContent.trim()!=='null'){
   try{STATIC_DATA=JSON.parse(seedElement.textContent)}
   catch(error){DATA_LOAD_ERROR=error;console.error('Không đọc được dữ liệu nhúng trong trang HTML.',error)}
-}else if(location.protocol==='http:'||location.protocol==='https:'){
+}
+if(location.protocol==='http:'||location.protocol==='https:'){
   try{
-    const response=await fetch(new URL('museum-data.json',location.href),{cache:'no-store'});
-    if(!response.ok)throw new Error(`HTTP ${response.status}`);
-    STATIC_DATA=await response.json();
-    if(!STATIC_DATA||!Array.isArray(STATIC_DATA.items))throw new Error('File JSON không có danh sách items hợp lệ.');
-    if(seedElement)seedElement.textContent=JSON.stringify(STATIC_DATA).replace(/</g,'\\u003c');
-  }catch(error){DATA_LOAD_ERROR=error;console.error('Không tải được museum-data.json.',error)}
+    const configResponse=await fetch(new URL('museum-drive-config.json',location.href),{cache:'no-store'});
+    if(configResponse.ok){
+      const config=await configResponse.json();
+      DRIVE_CONFIG={clientId:String(config.clientId||''),apiKey:String(config.apiKey||''),folderId:String(config.folderId||'')};
+    }
+  }catch(error){console.error('Không thể đọc museum-drive-config.json.',error)}
+  if(DRIVE_CONFIG.apiKey&&DRIVE_CONFIG.folderId){
+    try{
+      const listUrl=new URL('https://www.googleapis.com/drive/v3/files');
+      listUrl.searchParams.set('q',`'${DRIVE_CONFIG.folderId}' in parents and name='museum-data.json' and trashed=false`);
+      listUrl.searchParams.set('fields','files(id,name,modifiedTime)');
+      listUrl.searchParams.set('orderBy','modifiedTime desc');
+      listUrl.searchParams.set('key',DRIVE_CONFIG.apiKey);
+      const listResponse=await fetch(listUrl,{cache:'no-store'});
+      if(!listResponse.ok)throw new Error(`Drive API HTTP ${listResponse.status}`);
+      const {files=[]}=await listResponse.json();
+      if(files.length){
+        DRIVE_DATA_FILE_ID=files[0].id;
+        const dataUrl=new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(files[0].id)}`);
+        dataUrl.searchParams.set('alt','media');dataUrl.searchParams.set('key',DRIVE_CONFIG.apiKey);
+        const dataResponse=await fetch(dataUrl,{cache:'no-store'});
+        if(!dataResponse.ok)throw new Error(`Không tải được museum-data.json từ Drive (HTTP ${dataResponse.status}).`);
+        const data=await dataResponse.json();
+        if(!data||!Array.isArray(data.items))throw new Error('museum-data.json trên Drive không có danh sách items hợp lệ.');
+        STATIC_DATA=data;
+      }
+    }catch(error){DRIVE_LOAD_ERROR=error;console.error('Không thể tải dữ liệu bảo tàng từ Google Drive.',error)}
+  }
+  if(!STATIC_DATA){
+    try{
+      const response=await fetch(new URL('museum-data.json',location.href),{cache:'no-store'});
+      if(!response.ok)throw new Error(`HTTP ${response.status}`);
+      STATIC_DATA=await response.json();
+      if(!STATIC_DATA||!Array.isArray(STATIC_DATA.items))throw new Error('File JSON không có danh sách items hợp lệ.');
+    }catch(error){DATA_LOAD_ERROR=error;console.error('Không tải được museum-data.json.',error)}
+  }
+  if(seedElement&&STATIC_DATA)seedElement.textContent=JSON.stringify(STATIC_DATA).replace(/</g,'\\u003c');
 }
 const SRC='<!DOCTYPE html>\n'+document.documentElement.outerHTML; // bản gốc để xuất file HTML chia sẻ
 const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
@@ -41,6 +74,7 @@ function loadUserPrefs(){
 }
 const USER_PREFS=loadUserPrefs();
 let walkLibrariesPromise=null;
+let walkMeshoptDecoderPromise=null;
 function ensureWalkLibraries(){
   if(window.THREE?.GLTFLoader)return Promise.resolve(window.THREE);
   if(!walkLibrariesPromise){
@@ -57,6 +91,18 @@ function ensureWalkLibraries(){
   }
   return walkLibrariesPromise;
 }
+function ensureWalkMeshoptDecoder(){
+  if(!walkMeshoptDecoderPromise){
+    walkMeshoptDecoderPromise=import('./resources/meshopt_decoder.mjs').then(async({MeshoptDecoder})=>{
+      await MeshoptDecoder.ready;
+      return MeshoptDecoder;
+    }).catch(error=>{
+      walkMeshoptDecoderPromise=null;
+      throw error;
+    });
+  }
+  return walkMeshoptDecoderPromise;
+}
 function projectAssetPath(value,folder){
   let path=String(value||'').trim().replace(/\\/g,'/').replace(/^(?:\.\/)+/,'');
   if(!path)return '';
@@ -65,6 +111,8 @@ function projectAssetPath(value,folder){
   return path;
 }
 function assetHref(path){
+  const driveMatch=String(path||'').match(/^drive:([A-Za-z0-9_-]+)$/);
+  if(driveMatch&&DRIVE_CONFIG.apiKey)return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveMatch[1])}?alt=media&key=${encodeURIComponent(DRIVE_CONFIG.apiKey)}`;
   if(/^data:/i.test(String(path||'')))return path;
   return String(path||'').split('/').map(encodeURIComponent).join('/');
 }
@@ -579,6 +627,128 @@ function load(){
 let S=load(), saveT=null,saveChain=Promise.resolve();
 if(USER_PREFS.narration!==null)S.settings.voice=USER_PREFS.narration;
 let dataDirty=false;
+let driveAccessToken='',driveTokenClient=null,driveEditorAuthorized=false;
+function driveConfigured(){return !!(DRIVE_CONFIG.clientId&&DRIVE_CONFIG.apiKey&&DRIVE_CONFIG.folderId)}
+function loadGoogleIdentity(){
+  if(window.google?.accounts?.oauth2)return Promise.resolve();
+  return new Promise((resolve,reject)=>{
+    const existing=document.querySelector('script[data-google-identity]');
+    if(existing){existing.addEventListener('load',resolve,{once:true});existing.addEventListener('error',()=>reject(new Error('Không tải được dịch vụ đăng nhập Google.')),{once:true});return}
+    const script=document.createElement('script');
+    script.src='https://accounts.google.com/gsi/client';script.async=true;script.defer=true;script.dataset.googleIdentity='true';
+    script.onload=resolve;script.onerror=()=>reject(new Error('Không tải được dịch vụ đăng nhập Google.'));
+    document.head.appendChild(script);
+  });
+}
+if(DRIVE_CONFIG.clientId)loadGoogleIdentity().catch(error=>console.error('Không tải được dịch vụ đăng nhập Google.',error));
+async function requestDriveAccess(){
+  if(!driveConfigured())throw new Error('Chưa cấu hình clientId, apiKey và folderId trong museum-drive-config.json.');
+  if(!window.google?.accounts?.oauth2){
+    await loadGoogleIdentity();
+    throw new Error('Đã tải dịch vụ đăng nhập Google. Hãy bấm kết nối thêm lần nữa để đăng nhập.');
+  }
+  return new Promise((resolve,reject)=>{
+    try{
+      driveTokenClient=window.google.accounts.oauth2.initTokenClient({
+        client_id:DRIVE_CONFIG.clientId,
+        scope:'https://www.googleapis.com/auth/drive',
+        callback:response=>{
+          if(response.error){driveAccessToken='';driveEditorAuthorized=false;reject(new Error(response.error_description||response.error));return}
+          driveAccessToken=response.access_token;
+          resolve(driveAccessToken);
+        },
+        error_callback:error=>reject(new Error(error.message||'Đăng nhập Google thất bại.'))
+      });
+      driveTokenClient.requestAccessToken({prompt:''});
+    }catch(error){reject(error)}
+  });
+}
+async function driveRequest(url,options={}){
+  const headers=new Headers(options.headers||{});
+  if(driveAccessToken)headers.set('Authorization',`Bearer ${driveAccessToken}`);
+  const response=await fetch(url,Object.assign({},options,{headers}));
+  if(!response.ok){
+    const body=await response.text();
+    if(response.status===401){driveAccessToken='';driveEditorAuthorized=false}
+    throw new Error(`Google Drive HTTP ${response.status}${body?`: ${body.slice(0,240)}`:''}${response.status===401?'. Hãy kết nối lại tài khoản Google.':''}`);
+  }
+  if(response.status===204)return null;
+  return response.json();
+}
+function driveApiUrl(path,params={}){
+  const url=new URL(`https://www.googleapis.com/drive/v3/${path}`);
+  Object.entries(params).forEach(([key,value])=>url.searchParams.set(key,String(value)));
+  return url;
+}
+async function authorizeDriveEditor(){
+  if(!driveAccessToken)await requestDriveAccess();
+  const folder=await driveRequest(driveApiUrl(`files/${encodeURIComponent(DRIVE_CONFIG.folderId)}`,{fields:'id,name,capabilities(canEdit)'}));
+  if(!folder.capabilities?.canEdit){
+    driveAccessToken='';driveEditorAuthorized=false;
+    throw new Error('Tài khoản Google này chỉ có quyền xem. Hãy cấp quyền Người chỉnh sửa cho thư mục Drive.');
+  }
+  driveEditorAuthorized=true;
+  const status=$('#saveStatus');if(status)status.textContent='Đã kết nối Google Drive · có quyền chỉnh sửa';
+}
+async function ensureDriveFilePublic(fileId){
+  const existing=await driveRequest(driveApiUrl(`files/${encodeURIComponent(fileId)}/permissions`,{fields:'permissions(id,type,role)'}));
+  if(existing.permissions?.some(permission=>permission.type==='anyone'&&permission.role==='reader'))return;
+  await driveRequest(driveApiUrl(`files/${encodeURIComponent(fileId)}/permissions`),{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({type:'anyone',role:'reader'})
+  });
+}
+async function driveListDataFile(){
+  const files=await driveRequest(driveApiUrl('files',{
+    q:`'${DRIVE_CONFIG.folderId}' in parents and name='museum-data.json' and trashed=false`,
+    fields:'files(id,name,modifiedTime)',orderBy:'modifiedTime desc',pageSize:100
+  }));
+  return files.files?.[0]||null;
+}
+async function driveUpload(name,blob,mimeType,fileId=null){
+  if(!driveEditorAuthorized)throw new Error('Cần kết nối tài khoản Google có quyền chỉnh sửa trước khi tải lên.');
+  let file;
+  if(fileId){
+    file=await driveRequest(new URL(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=media&fields=id,name`),{
+      method:'PATCH',headers:{'Content-Type':mimeType},body:blob
+    });
+  }else{
+    const boundary=`museum_${crypto.randomUUID().replace(/-/g,'')}`;
+    const metadata={name,mimeType,parents:[DRIVE_CONFIG.folderId]};
+    const body=new Blob([
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`,
+      JSON.stringify(metadata),
+      `\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`,
+      blob,
+      `\r\n--${boundary}--`
+    ],{type:`multipart/related; boundary=${boundary}`});
+    file=await driveRequest(new URL('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name'),{
+      method:'POST',headers:{'Content-Type':`multipart/related; boundary=${boundary}`},body
+    });
+  }
+  await ensureDriveFilePublic(file.id);
+  return file;
+}
+async function saveDataToDrive(){
+  if(!driveEditorAuthorized)throw new Error('Chưa đăng nhập Google Drive với quyền chỉnh sửa.');
+  if(!DRIVE_DATA_FILE_ID){
+    const existing=await driveListDataFile();
+    if(existing)DRIVE_DATA_FILE_ID=existing.id;
+  }
+  const blob=new Blob([JSON.stringify(S,null,2)],{type:'application/json'});
+  const file=await driveUpload('museum-data.json',blob,'application/json',DRIVE_DATA_FILE_ID);
+  DRIVE_DATA_FILE_ID=file.id;dataDirty=false;
+  const status=$('#saveStatus');if(status)status.textContent='Đã lưu dữ liệu và chia sẻ quyền xem trên Google Drive';
+}
+function queueDriveSave(){
+  saveChain=saveChain.catch(()=>{}).then(saveDataToDrive);
+  return saveChain;
+}
+async function connectDriveEditor(){
+  await authorizeDriveEditor();
+  renderEd();
+  toast('Đã đăng nhập Google Drive. Bạn có quyền chỉnh sửa dữ liệu.');
+}
 function markDataDirty(){
   dataDirty=true;
   const status=$('#saveStatus');if(status)status.textContent='Thay đổi chưa lưu';
@@ -596,6 +766,21 @@ async function writeDataFile(handle,requestPermission=false){
 }
 function save(){
   markDataDirty();
+  if(driveConfigured()){
+    if(!driveEditorAuthorized){
+      const status=$('#saveStatus');if(status)status.textContent='Chưa xác thực quyền Google Drive';
+      return;
+    }
+    clearTimeout(saveT);
+    saveT=setTimeout(()=>{
+      queueDriveSave().catch(error=>{
+        console.error('Không thể tự lưu dữ liệu lên Google Drive.',error);
+        const status=$('#saveStatus');if(status)status.textContent='Lỗi lưu Google Drive';
+        toast(`Không tự lưu được lên Google Drive: ${error.message}`);
+      });
+    },500);
+    return;
+  }
   if(!DATA_FILE_HANDLE)return;
   clearTimeout(saveT);
   saveT=setTimeout(()=>{
@@ -610,7 +795,11 @@ async function saveNow(){
   clearTimeout(saveT);
   const button=$('#saveNow');if(button){button.disabled=true;button.textContent='Đang lưu…'}
   try{
-    if(DATA_FILE_HANDLE){
+    if(driveConfigured()){
+      if(!driveEditorAuthorized)await authorizeDriveEditor();
+      await queueDriveSave();
+      toast('Đã lưu thành công lên Google Drive.');
+    }else if(DATA_FILE_HANDLE){
       const handle=DATA_FILE_HANDLE;
       saveChain=saveChain.catch(()=>{}).then(()=>writeDataFile(handle,true));
       await saveChain;
@@ -1122,15 +1311,26 @@ document.addEventListener('keydown',e=>{
 
 /* ====================== TRÌNH QUẢN LÝ ====================== */
 const ed={tab:'items',id:null};
-function openEditor(){
+async function openEditor(itemId=null){
+  if(!driveConfigured()){
+    toast('Chưa cấu hình Google Drive. Điền clientId, apiKey và folderId trong museum-drive-config.json trước khi chỉnh sửa.');
+    return;
+  }
+  try{await authorizeDriveEditor()}
+  catch(error){console.error('Không thể xác thực quyền chỉnh sửa Google Drive.',error);toast(`Không mở được phần quản lý: ${error.message}`);return}
   if(T.on&&!T.paused)tourPause();
-  ed.tab='items';ed.id=S.items[0]?S.items[0].id:null;
+  ed.tab='items';ed.id=S.items.some(item=>item.id===itemId)?itemId:(S.items[0]?S.items[0].id:null);
   $('#editor').hidden=false;renderEd();
 }
 function closeEditor(){
   save();$('#editor').hidden=true;applyMeta();
   if(cur.view==='hall')renderHall();
   else if(cur.view==='room'){const it=S.items.find(i=>i.id===cur.id);if(it)renderRoom(it);else setView('hall')}
+  if(W.active){
+    const it=S.items.find(item=>item.id===ed.id);
+    if(it)walkRefreshItem(it);
+    if(W.current&&!S.items.some(item=>item.id===W.current.id))walkCloseDetail();
+  }
 }
 $('#edClose').onclick=closeEditor;
 $('#saveNow').onclick=saveNow;
@@ -1169,7 +1369,7 @@ function formHTML(it){
   </div>
   ${it.type==='phim'?'<div class="help">Phim sa hình dựng sẵn. Bạn có thể sửa tên, mô tả và kịch bản: mỗi dòng kịch bản ứng với một cảnh (6 cảnh).</div>':''}<div class="fld" ${it.type==='phim'?'hidden':''}><label>Hình ảnh của hiện vật</label>
     <div class="imgrow"><div>${prev}</div>
-      <div><label for="imgPath">Tên file ảnh trong thư mục dự án</label><input type="text" id="imgPath" value="${esc(/^data:/i.test(it.img||'')?'':it.img)}" placeholder="images/ten-anh.jpg"><p class="small" style="margin:8px 0">Chép ảnh vào thư mục images rồi nhập đường dẫn tương đối, ví dụ images/rach-gam.jpg. Không tải ảnh lên trình duyệt.</p>${it.img?'<button class="btn sm danger" id="imgDel">Bỏ ảnh khỏi hiện vật</button>':''}</div>
+      <div><label for="imgUpload">Tải ảnh lên Google Drive</label><input type="file" id="imgUpload" accept="image/*"><p class="small" style="margin:8px 0">Ảnh sẽ được tải lên thư mục Drive, chia sẻ quyền xem cho khách tham quan và gắn vào hiện vật này.${it.img&&!/^drive:/i.test(it.img)?` Ảnh hiện tại dùng đường dẫn cũ: ${esc(it.img)}.`:''}</p>${it.img?'<button class="btn sm danger" id="imgDel">Bỏ ảnh khỏi hiện vật</button>':''}</div>
     </div></div>
   ${galleryPosition}
   ${isDoc?`<div class="fld"><label>Nội dung tư liệu (mỗi dòng là một đoạn, hiện trên tờ giấy tư liệu)</label><textarea data-k="text" style="min-height:140px">${esc(it.text)}</textarea></div>`:''}
@@ -1235,10 +1435,10 @@ function downloadSavedResource(resource){
 }
 function edData(){
   return `<div class="ed-pane"><div class="datagrid">
-  <div class="help">Không còn lưu dữ liệu trong bộ nhớ trình duyệt. Khi chạy trên web, museum-data.json được đọc cạnh file HTML. Khi mở trực tiếp bằng file://, hãy mở JSON bằng nút bên dưới. Dùng “Lưu ngay” để chọn hoặc cập nhật file JSON; nếu trình duyệt không hỗ trợ ghi file, nút sẽ tải JSON xuống để thay vào thư mục dự án.</div>
-  <div class="card"><h3>Kết nối file dữ liệu</h3><p class="small">Chọn museum-data.json trên máy để nạp nội dung và cho phép lưu thay đổi trực tiếp vào file đó (trình duyệt Chromium mới).</p><button class="btn" id="openDataFile">📂 Mở museum-data.json để chỉnh sửa</button></div>
+  <div class="help">Dữ liệu văn bản được tự lưu lên Google Drive sau mỗi thay đổi. Chỉ tài khoản Google có quyền chỉnh sửa thư mục Drive mới được vào phần quản lý; khách tham quan chỉ có thể xem.</div>
+  <div class="card"><h3>Kết nối Google Drive</h3><p class="small">Trạng thái: ${driveEditorAuthorized?'Đã kết nối và được phép chỉnh sửa.':'Chưa kết nối.'} Ảnh và museum-data.json được chia sẻ quyền xem qua liên kết để bảo tàng tải được cho khách.</p><p class="small">Cấu hình trong museum-drive-config.json: OAuth Client ID, API key và ID thư mục Drive. Chia sẻ thư mục với quyền Người xem qua liên kết, sau đó cấp quyền Người chỉnh sửa riêng cho tài khoản quản lý. Giới hạn API key theo tên miền của trang.</p><button class="btn" id="driveReconnect">🔐 Kết nối lại Google Drive</button></div>
   <div class="card"><h3>Chủ đề mẫu</h3><p class="small">Nạp một chủ đề dựng sẵn. Nội dung hiện tại sẽ bị thay thế, hãy sao lưu trước nếu cần.</p><div style="display:flex;gap:8px;flex-wrap:wrap">${THEMES.map(th=>`<button class="btn" data-theme="${th.id}">${esc(th.name)}</button>`).join('')}</div></div>
-  <div class="card"><h3>Chia sẻ cho học sinh</h3><p class="small">Chép cả thư mục dự án, gồm HTML, CSS, JavaScript, museum-data.json, images, resources và video. Để chạy online, triển khai toàn bộ thư mục này lên Vercel.</p><button class="btn primary" id="exportHtml">Tải file HTML kèm CSS/JS</button></div>
+  <div class="card"><h3>Chia sẻ cho học sinh</h3><p class="small">Triển khai thư mục ứng dụng lên máy chủ web HTTPS. museum-drive-config.json chứa thông tin công khai (không chứa mật khẩu); không đặt OAuth Client Secret trong mã trình duyệt.</p><button class="btn primary" id="exportHtml">Tải file HTML kèm CSS/JS</button></div>
   <div class="card"><h3>Sao lưu dữ liệu</h3><p class="small">Xuất toàn bộ nội dung ra file .json để lưu hoặc chuyển sang máy khác. Khi nhập JSON, các đường dẫn media vẫn trỏ vào những file tương ứng trong thư mục dự án.</p><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="exportJson">Xuất file sao lưu (.json)</button><label class="btn" style="cursor:pointer">Nhập file sao lưu<input type="file" id="importJson" accept=".json,application/json" hidden></label></div></div>
   <div class="card"><h3>Làm mới</h3><p class="small">Xoá sạch hiện vật để bắt đầu một bảo tàng trống cho chủ đề khác.</p><button class="btn danger" id="clearAll">Xoá hết hiện vật</button></div>
   </div></div>`;
@@ -1304,13 +1504,30 @@ edBody.addEventListener('input',e=>{
 });
 edBody.addEventListener('change',async e=>{
   const t=e.target;
-  if(t.dataset.k==='type'||t.dataset.k==='gallerySlot'||t.dataset.k==='hotspots'||t.dataset.k==='phases'||t.dataset.k==='text'){renderEd()}
-  if(t.id==='imgPath'){
-    const it=S.items.find(i=>i.id===ed.id);if(!it)return;
-    try{it.img=projectAssetPath(t.value,'images');save();renderEd();toast('Đã cập nhật đường dẫn ảnh.')}
-    catch(error){toast(`Đường dẫn ảnh không hợp lệ: ${error.message}`)}
+  if(t.id==='imgUpload'&&t.files?.[0]){
+    const file=t.files[0],it=S.items.find(item=>item.id===ed.id);
+    if(!it)return;
+    if(!file.type.startsWith('image/')){toast('Chọn tệp hình ảnh hợp lệ.');t.value='';return}
+    let uploaded;
+    try{
+      const existingId=(it.img||'').match(/^drive:([A-Za-z0-9_-]+)$/)?.[1]||null;
+      uploaded=await driveUpload(file.name,file,file.type,existingId);
+    }catch(error){
+      console.error('Không thể tải ảnh hoặc đặt quyền xem trên Google Drive.',error);
+      toast(`Không tải được ảnh lên Google Drive: ${error.message}`);
+      t.value='';return;
+    }
+    it.img=`drive:${uploaded.id}`;markDataDirty();
+    try{
+      await queueDriveSave();
+      renderEd();toast('Đã lưu ảnh và dữ liệu hiện vật lên Google Drive.');
+    }catch(error){
+      console.error('Ảnh đã tải lên nhưng không thể lưu dữ liệu hiện vật vào Google Drive.',error);
+      renderEd();toast(`Ảnh đã tải lên, nhưng chưa lưu dữ liệu hiện vật: ${error.message}`);
+    }finally{const input=$('#imgUpload');if(input)input.value=''}
     return;
   }
+  if(t.dataset.k==='type'||t.dataset.k==='gallerySlot'||t.dataset.k==='hotspots'||t.dataset.k==='phases'||t.dataset.k==='text'){renderEd()}
   if(t.id==='importJson'&&t.files[0]){
     try{
       const d=validMuseumData(JSON.parse(await t.files[0].text()));
@@ -1322,6 +1539,10 @@ edBody.addEventListener('change',async e=>{
 });
 edBody.addEventListener('click',e=>{
   const t=e.target;
+  if(t.closest('#driveReconnect')){
+    connectDriveEditor().catch(error=>{console.error('Không thể kết nối Google Drive.',error);toast(`Kết nối Google Drive thất bại: ${error.message}`)});
+    return;
+  }
   if(t.closest('#openDataFile')){openDataFile();return}
   if(t.closest('#addResourcePath')){
     const input=$('#resourcePath'),value=input&&input.value;
@@ -1409,7 +1630,8 @@ edBody.addEventListener('click',e=>{
 /* ====================== KHỞI ĐỘNG ====================== */
 try{if('speechSynthesis' in window){speechSynthesis.getVoices();speechSynthesis.addEventListener('voiceschanged',()=>{if(!$('#editor').hidden&&ed.tab==='museum')renderEd()})}}catch(e){}
 applyMeta();applySettingsLanguage();setTourUI();
-if(DATA_LOAD_ERROR)toast(`Không tải được museum-data.json: ${DATA_LOAD_ERROR.message}. Hãy nhập JSON trong Quản lý → Lưu và chia sẻ.`);
+if(DRIVE_LOAD_ERROR)toast(`Không tải được dữ liệu Drive: ${DRIVE_LOAD_ERROR.message}. Đang dùng dữ liệu cục bộ nếu có.`);
+else if(DATA_LOAD_ERROR)toast(`Không tải được museum-data.json: ${DATA_LOAD_ERROR.message}. Hãy kiểm tra tệp dữ liệu.`);
 else if(location.protocol==='file:'&&!STATIC_DATA)toast('Đang dùng nội dung mẫu. Mở Quản lý → Lưu và chia sẻ → Mở museum-data.json để nạp dữ liệu dự án.');
 /* ====================== THAM QUAN 3D ĐI BỘ ====================== */
 const WALK_TYPES={
@@ -1418,7 +1640,7 @@ const WALK_TYPES={
   battle:{label:'Phòng sa hình',icon:'🗺',center:[0,-14],color:0x17332e},
   documents:{label:'Phòng tư liệu',icon:'📜',center:[0,14],color:0x39271a}
 };
-const W={active:false,ready:false,loopRunning:false,renderer:null,scene:null,camera:null,root:null,targets:[],solids:[],rooms:[],keys:{},joystick:{x:0,y:0},velocity:{x:0,z:0},yaw:0,pitch:0,last:0,ray:null,centerRay:null,current:null,activeCampaign:'xiem',promptAt:0,promptText:'',statusText:'',screenCanvas:null,screenTexture:null,screenLast:0,tvScreens:[],tvVideoElements:{},tvVideoTextures:{},tvPreviewsLoaded:new Set(),pendingGalleryImages:[],galleryImagesLoading:false,pendingArtifactImages:[],artifactImagesLoaded:false,pendingModels:[],modelLoadsStarted:new Set(),ships:[],battleFleet:[],battleArmy:[],battleShots:[],battleEffects:[],battleMuzzles:[],battleGroup:null,battleCampaignGroups:{},battleOriginalFov:null,battleElapsed:0,battlePaused:false,battleRunning:false,battleSiegeTriggered:false,battleStart:0,battlePhase:-1,wasLocked:false};
+const W={active:false,ready:false,loopRunning:false,renderer:null,scene:null,camera:null,root:null,targets:[],solids:[],rooms:[],keys:{},joystick:{x:0,y:0},velocity:{x:0,z:0},yaw:0,pitch:0,last:0,ray:null,centerRay:null,current:null,activeCampaign:'xiem',promptAt:0,promptText:'',statusText:'',screenCanvas:null,screenTexture:null,screenLast:0,tvScreens:[],tvVideoElements:{},tvVideoTextures:{},pendingGalleryImages:[],galleryImagesLoading:false,pendingArtifactImages:[],artifactImagesLoaded:false,pendingModels:[],modelLoadsStarted:new Set(),ships:[],battleFleet:[],battleArmy:[],battleShots:[],battleEffects:[],battleMuzzles:[],battleGroup:null,battleCampaignGroups:{},battleOriginalFov:null,battleElapsed:0,battlePaused:false,battleRunning:false,battleSiegeTriggered:false,battleStart:0,battlePhase:-1,wasLocked:false};
 function walkUpdateJoystick(event){
   const rect=$('#walkJoystick').getBoundingClientRect();
   const maximum=Math.min(rect.width,rect.height)*.25,centerX=rect.left+rect.width/2,centerY=rect.top+rect.height/2;
@@ -1464,9 +1686,8 @@ function walkMakeUI(){
     <div class="walk-help">Di chuyển: <b>W A S D</b> hoặc phím mũi tên · Nhìn quanh: <b>di chuyển chuột</b> · Tương tác: <b>E</b> hoặc nhấp chuột khi ngắm hiện vật · <b>Esc</b>: nhả chuột</div>
     <div class="walk-status" id="walkStatus">Đang ở sảnh trung tâm</div>
     <div class="walk-mobile"><div class="walk-joystick" id="walkJoystick" role="application" aria-label="Cần điều khiển di chuyển"><div class="walk-joystick-base"><div class="walk-joystick-knob" id="walkJoystickKnob"></div></div></div></div>
-    <div class="walk-orientation" id="walkOrientation" role="status"><div class="walk-orientation-icon" aria-hidden="true">📱 ↻</div><h2>Xoay ngang điện thoại</h2><p>Không gian tham quan 3D cần màn hình ngang để hiển thị đầy đủ và điều khiển thuận tiện.</p></div>
     <button class="walk-interact" id="walkInteract">✦ Tương tác</button>
-    <div class="walk-overlay" id="walkIntro"><div class="walk-card"><p class="eyebrow">Không gian trưng bày tương tác</p><h2>Khám phá bảo tàng bằng góc nhìn người tham quan</h2><p>Bước qua sảnh trung tâm để tự do đi vào bốn phòng. Tranh được treo trên tường; hiện vật đặt trên bệ trưng bày; sa hình có thể tái hiện diễn biến trận đánh; phòng tư liệu có các văn bản để đọc.</p><div><span class="walk-pill">WASD / phím mũi tên</span><span class="walk-pill">Chuột để nhìn quanh</span><span class="walk-pill">E để tương tác</span></div><p class="small">Mô hình hiện vật 3D hiện là mô phỏng minh họa bằng hình khối. Giáo viên có thể thay ảnh, mô tả và thuyết minh qua mục “Quản lý” ở giao diện bảo tàng thông thường.</p><div class="walk-buttons"><button class="primary" id="walkBegin">Bắt đầu tham quan 3D</button><button id="walkBack">Quay lại giao diện danh mục</button></div></div></div>
+    <div class="walk-overlay" id="walkIntro"><div class="walk-card"><p class="eyebrow">Không gian trưng bày tương tác</p><h2>Khám phá bảo tàng bằng góc nhìn người tham quan</h2><p>Bước qua sảnh trung tâm để tự do đi vào bốn phòng. Tranh được treo trên tường; hiện vật đặt trên bệ trưng bày; sa hình có thể tái hiện diễn biến trận đánh; phòng tư liệu có các văn bản để đọc.</p><div><span class="walk-pill">WASD / phím mũi tên</span><span class="walk-pill">Chuột hoặc vuốt màn hình để nhìn quanh</span><span class="walk-pill">E hoặc nút Tương tác</span></div><p class="small">Trên điện thoại, dùng cần điều khiển ở góc trái để di chuyển, vuốt màn hình để nhìn quanh và nhấn nút Tương tác. Hiện vật 3D được nạp từ các mô hình đã tối ưu dung lượng. Giáo viên có thể thay ảnh, mô tả và thuyết minh qua mục “Quản lý” ở giao diện bảo tàng thông thường.</p><div class="walk-buttons"><button class="primary" id="walkBegin">Bắt đầu tham quan 3D</button><button id="walkBack">Quay lại giao diện danh mục</button></div></div></div>
     <aside class="walk-detail" id="walkDetail" hidden><button class="close" id="walkDetailClose" aria-label="Đóng">×</button><div id="walkDetailContent"></div></aside>
     <div class="walk-image-zoom" id="walkImageZoom" hidden role="dialog" aria-modal="true" aria-label="Ảnh phóng to"><button class="walk-image-close" id="walkImageClose" aria-label="Đóng ảnh">×</button><div class="walk-image-content" id="walkImageContent"></div></div>
   `;
@@ -1487,7 +1708,7 @@ function walkMakeUI(){
     try{
       await ensureWalkLibraries();
       if(!W.ready)walkInit();
-      if(W.ready){$('#walkIntro').hidden=true;$('#walkDetail').hidden=true;walkStartLoop();if($('#settings').hidden)walkRequestLock();}
+      if(W.ready){walkStartTVPreviews();$('#walkIntro').hidden=true;$('#walkDetail').hidden=true;walkStartLoop();if($('#settings').hidden)walkRequestLock();}
     }catch(error){
       console.error('Không tải được thư viện 3D hoặc GLTFLoader.',error);
       walkTextToast('Không tải được thư viện 3D. Hãy kiểm tra kết nối Internet rồi thử lại.');
@@ -1571,7 +1792,7 @@ function walkOpen(){
   W.active=true;$('#walk3d').hidden=false;$('#walkIntro').hidden=false;$('#walkDetail').hidden=true;
   document.body.dataset.view='walk3d';$('#caption').classList.remove('show');document.body.classList.remove('cap-on');
   walkRequestLandscape();
-  if(W.ready){walkResize();walkStartLoop();}
+  if(W.ready){walkResize();walkStartTVPreviews();walkStartLoop();}
 }
 function walkRequestLandscape(){
   if(!window.matchMedia('(max-width: 760px)').matches||!screen.orientation?.lock)return;
@@ -1581,8 +1802,9 @@ function walkRequestLandscape(){
 }
 function walkLeave(){
   if(!$('#walkBattlePanel').hidden)walkStopBattle();
-  if(!$('#walkDetail').hidden)walkCloseDetail();
+  if(!$('#walkDetail').hidden)walkCloseDetail(false);
   if(!$('#walkImageZoom').hidden)walkCloseGalleryImage();
+  Object.values(W.tvVideoElements).forEach(video=>video.pause());
   if(document.pointerLockElement===$('#walkCanvas'))document.exitPointerLock?.();
   W.active=false;W.battleRunning=false;W.keys={};W.joystick={x:0,y:0};$('#walkJoystickKnob').style.transform='translate(0,0)';$('#walk3d').hidden=true;$('#walkIntro').hidden=true;$('#walkDetail').hidden=true;
   document.body.dataset.view=cur.view||'entry';
@@ -1683,37 +1905,6 @@ function walkTrimRoom(cx,cz,mat){
     walkBox(.14,.16,d,mat,cx-w/2+.12,y,cz);walkBox(.14,.16,d,mat,cx+w/2-.12,y,cz);
   });
 }
-function walkChainBarrier(cx,cz,axis){
-  const iron=walkMaterial(0x34383b,.32,.78),cap=walkMaterial(0xb8bec2,.24,.82);
-  const span=11.2,segments=5;
-  for(let i=0;i<=segments;i++){
-    const offset=-span/2+span*i/segments;
-    const x=cx+(axis==='x'?offset:0),z=cz+(axis==='z'?offset:0);
-    walkCylinder(.105,.14,.78,iron,x,.39,z,{seg:18});
-    walkCylinder(.16,.16,.09,cap,x,.79,z,{seg:20});
-    walkCylinder(.19,.19,.09,iron,x,.09,z,{seg:20});
-  }
-  for(let i=0;i<segments;i++){
-    const a=-span/2+span*i/segments,b=-span/2+span*(i+1)/segments;
-    const x1=cx+(axis==='x'?a:0),z1=cz+(axis==='z'?a:0);
-    const x2=cx+(axis==='x'?b:0),z2=cz+(axis==='z'?b:0);
-    const points=[];
-    for(let k=0;k<=16;k++){
-      const t=k/16;
-      const sag=.23*Math.sin(Math.PI*t);
-      points.push(new THREE.Vector3(x1+(x2-x1)*t,.58-sag,z1+(z2-z1)*t));
-    }
-    const curve=new THREE.CatmullRomCurve3(points);
-    const chain=new THREE.Mesh(new THREE.TubeGeometry(curve,24,.035,8,false),iron);
-    chain.castShadow=true;W.scene.add(chain);
-    // Small connecting rings make the barrier read as linked iron chain.
-    for(let k=1;k<8;k++){
-      const t=k/8, sag=.23*Math.sin(Math.PI*t);
-      const ring=walkCylinder(.045,.045,.035,cap,x1+(x2-x1)*t,.58-sag,z1+(z2-z1)*t,{seg:10});
-      ring.rotation.z=axis==='x'?Math.PI/2:0;
-    }
-  }
-}
 function walkBuildArchitecture(){
   const hallMat=walkMaterial(0xf5f4ef,.82,.01),roomMat=walkMaterial(0xf8f8f5,.86,.01),trim=walkMaterial(0xb18a4e,.38,.45),dark=walkMaterial(0x292724,.85,.04);
   walkFloor(14,14,0,0,'marble');
@@ -1739,9 +1930,6 @@ function walkBuildArchitecture(){
   [[-7,-7],[-7,7],[7,-7],[7,7]].forEach(([x,z])=>walkPillar(x,z,trim));
   walkGateway(-8,0,true);walkGateway(8,0,true);walkGateway(0,-8,false);walkGateway(0,8,false);
   [[-5.35,-5.35],[-5.35,5.35],[5.35,-5.35],[5.35,5.35]].forEach(([x,z])=>walkPlanter(x,z));
-  // Dải phân cách giữa hai khu: cột trụ kim loại và dây xích võng.
-  walkChainBarrier(-14,0,'x');walkChainBarrier(14,0,'x');
-  walkChainBarrier(0,-14,'z');walkChainBarrier(0,14,'z');
   walkSign('SẢNH TRUNG TÂM','RẠCH GẦM – XOÀI MÚT · 1785',0,3.1,-6.82,0,'#3a2119');
   walkSign('PHÒNG HÌNH ẢNH','TRANH · ẢNH · ĐỒ HỌA',-8.05,5.05,0,Math.PI/2,'#4b1719');
   walkSign('PHÒNG HIỆN VẬT','MÔ HÌNH 3D',8.05,5.05,0,-Math.PI/2,'#263039');
@@ -1831,8 +2019,8 @@ function walkCreatePicture(it,pos,yaw,w=2.5,h=1.85){
   walkBox(w+.22,.13,.15,gold,0,h/2+.09,0,{parent:root});walkBox(w+.22,.13,.15,gold,0,-h/2-.09,0,{parent:root});
   walkBox(.13,h+.35,.15,gold,-w/2-.045,0,0,{parent:root});walkBox(.13,h+.35,.15,gold,w/2+.045,0,0,{parent:root});
   walkBox(w+.05,h+.13,.05,dark,0,0,-.045,{parent:root});
-  const mat=new THREE.MeshBasicMaterial({map:walkTextureForItem(it,true),side:THREE.DoubleSide});const plane=new THREE.Mesh(new THREE.PlaneGeometry(w,h),mat);plane.position.z=.035;plane.castShadow=false;root.add(plane);
-  const label=new THREE.Mesh(new THREE.PlaneGeometry(w+.15,.42),new THREE.MeshBasicMaterial({map:walkLabelTexture(it.title,it.date||'TƯ LIỆU TRƯNG BÀY','#362018'),side:THREE.DoubleSide}));label.position.set(0,-h/2-.44,.04);root.add(label);
+  const mat=new THREE.MeshBasicMaterial({map:walkTextureForItem(it,true),side:THREE.DoubleSide});const plane=new THREE.Mesh(new THREE.PlaneGeometry(w,h),mat);plane.position.z=.035;plane.castShadow=false;plane.userData.galleryArtwork=true;root.add(plane);
+  const label=new THREE.Mesh(new THREE.PlaneGeometry(w+.15,.42),new THREE.MeshBasicMaterial({map:walkLabelTexture(it.title,it.date||'TƯ LIỆU TRƯNG BÀY','#362018'),side:THREE.DoubleSide}));label.position.set(0,-h/2-.44,.04);label.userData.galleryLabel=true;root.add(label);
   W.scene.add(root);W.targets.push(root);return root;
 }
 function walkBuildGallery(){
@@ -2127,33 +2315,40 @@ function walkLoadGLB(path,target,height,color,metalness,roughness,fallback,optio
     if(!W.pendingModels.some(model=>model.path===path))W.pendingModels.push({path,target,height,color,metalness,roughness,fallback,options});
     return;
   }
-  const loader=new THREE.GLTFLoader();
-  loader.load(new URL(path,location.href).href,gltf=>{
-    const model=gltf.scene,fitAxis=options.fitAxis||'y';
-    model.rotation.x=options.rotationX||0;
-    const sourceBox=new THREE.Box3().setFromObject(model),size=sourceBox.getSize(new THREE.Vector3()),axisSize=size[fitAxis];
-    if(!Number.isFinite(axisSize)||axisSize<=0){
-      const error=new Error(`Model ${path} không có kích thước hợp lệ.`);
-      console.error(error);fallback();toast(error.message);return;
-    }
-    model.scale.setScalar(height/axisSize);
-    const fittedBox=new THREE.Box3().setFromObject(model),center=fittedBox.getCenter(new THREE.Vector3());
-    model.position.set(-center.x,-fittedBox.min.y+(options.baseOffset||0),-center.z);
-    const material=options.preserveMaterials?null:options.carriage
-      ?new THREE.MeshStandardMaterial({color:0x815840,emissive:0x1d1008,emissiveIntensity:.12,roughness:.92,metalness:.16})
-      :walkMaterial(color,roughness,metalness);
-    model.traverse(node=>{
-      if(!node.isMesh)return;
-      node.castShadow=true;node.receiveShadow=true;
-      if(node.geometry&&!node.geometry.getAttribute('normal'))node.geometry.computeVertexNormals();
-      if(material)node.material=material;
+  ensureWalkMeshoptDecoder().then(decoder=>{
+    const loader=new THREE.GLTFLoader();
+    loader.setMeshoptDecoder(decoder);
+    loader.load(new URL(path,location.href).href,gltf=>{
+      const model=gltf.scene,fitAxis=options.fitAxis||'y';
+      model.rotation.x=options.rotationX||0;
+      const sourceBox=new THREE.Box3().setFromObject(model),size=sourceBox.getSize(new THREE.Vector3()),axisSize=size[fitAxis];
+      if(!Number.isFinite(axisSize)||axisSize<=0){
+        const error=new Error(`Model ${path} không có kích thước hợp lệ.`);
+        console.error(error);fallback();toast(error.message);return;
+      }
+      model.scale.setScalar(height/axisSize);
+      const fittedBox=new THREE.Box3().setFromObject(model),center=fittedBox.getCenter(new THREE.Vector3());
+      model.position.set(-center.x,-fittedBox.min.y+(options.baseOffset||0),-center.z);
+      const material=options.preserveMaterials?null:options.carriage
+        ?new THREE.MeshStandardMaterial({color:0x815840,emissive:0x1d1008,emissiveIntensity:.12,roughness:.92,metalness:.16})
+        :walkMaterial(color,roughness,metalness);
+      model.traverse(node=>{
+        if(!node.isMesh)return;
+        node.castShadow=true;node.receiveShadow=true;
+        if(node.geometry&&!node.geometry.getAttribute('normal'))node.geometry.computeVertexNormals();
+        if(material)node.material=material;
+      });
+      target.add(model);
+      if(options.carriage)walkCannonCarriage(target);
+    },undefined,error=>{
+      console.error(`Không tải được model 3D ${path}.`,error);
+      fallback();
+      toast(`Không tải được ${path}; đang dùng mô hình dự phòng.`);
     });
-    target.add(model);
-    if(options.carriage)walkCannonCarriage(target);
-  },undefined,error=>{
-    console.error(`Không tải được model 3D ${path}.`,error);
+  }).catch(error=>{
+    console.error('Không tải được bộ giải nén model 3D.',error);
     fallback();
-    toast(`Không tải được ${path}; đang dùng mô hình dự phòng.`);
+    toast(`Không thể giải nén model 3D ${path}.`);
   });
 }
 function walkBuildTaySonDisplays(){
@@ -2512,50 +2707,89 @@ function walkThanhRelief(group){
   }
 }
 function walkBuildBattle(){
+  const tableBase=walkMaterial(0x39271d,.58,.12),tableTop=walkMaterial(0x654329,.48,.14),tableTrim=walkMaterial(0xb88b48,.3,.68);
+  function buildMapTable(centerX){
+    walkBox(3.25,.18,6.5,tableBase,centerX,.84,-14);
+    walkBox(3.12,.045,6.37,tableTop,centerX,.95,-14);
+    walkBox(3.18,.055,.08,tableTrim,centerX,.99,-17.22);
+    walkBox(3.18,.055,.08,tableTrim,centerX,.99,-10.78);
+    walkBox(.08,.055,6.35,tableTrim,centerX-1.6,.99,-14);
+    walkBox(.08,.055,6.35,tableTrim,centerX+1.6,.99,-14);
+    for(const x of [centerX-1.35,centerX+1.35])for(const z of [-16.5,-11.5]){
+      walkBox(.24,.78,.24,tableBase,x,.39,z);
+      walkBox(.34,.08,.34,tableTrim,x,.79,z);
+    }
+  }
+  buildMapTable(-2.2);buildMapTable(2.2);
   const campaigns=[
-    {id:'xiem',x:-2.82,title:'RẠCH GẦM – XOÀI MÚT',subtitle:'CHIẾN DỊCH CHỐNG QUÂN XIÊM',color:'#4a1718',build:walkRiverRelief},
-    {id:'thanh',x:2.82,title:'NGỌC HỒI – ĐỐNG ĐA',subtitle:'CHIẾN DỊCH CHỐNG QUÂN THANH',color:'#273c32',build:walkThanhRelief}
+    {id:'xiem',x:-2.2,title:'RẠCH GẦM – XOÀI MÚT',subtitle:'CHIẾN DỊCH CHỐNG QUÂN XIÊM',color:'#4a1718',build:walkRiverRelief},
+    {id:'thanh',x:2.2,title:'NGỌC HỒI – ĐỐNG ĐA',subtitle:'CHIẾN DỊCH CHỐNG QUÂN THANH',color:'#273c32',build:walkThanhRelief}
   ];
   campaigns.forEach(campaign=>{
     const item=S.items.find(it=>it.type==='sahinh'&&(it.campaign||'xiem')===campaign.id)||{id:'map-'+campaign.id,campaign:campaign.id,type:'sahinh',title:campaign.title,detail:campaign.subtitle};
-    const group=new THREE.Group();group.position.set(campaign.x,0,-14);group.scale.set(.76,.76,.76);group.userData.item=item;group.userData.campaign=campaign.id;W.battleCampaignGroups[campaign.id]=group;W.scene.add(group);W.targets.push(group);
+    const group=new THREE.Group();group.position.set(campaign.x,.98,-14);group.scale.set(.44,.44,.44);group.userData.item=item;group.userData.campaign=campaign.id;W.battleCampaignGroups[campaign.id]=group;W.scene.add(group);W.targets.push(group);
     walkBattleGround(group,campaign.id==='xiem'?0x535b4b:0x6b5d4c,campaign.id);campaign.build(group);
     walkSign(campaign.title,campaign.subtitle,campaign.x,2.55,-19.68,0,campaign.color);
     walkPointLight(campaign.x,3.8,-14,0xffd18a,.85,6);
   });
   // Bốn TV treo tường: hai bên trái cho chiến dịch quân Xiêm, hai bên phải cho quân Thanh.
-  const tvFrame=walkMaterial(0x252a2e,.32,.58);W.tvScreens=[];W.tvVideoElements={};W.tvVideoTextures={};W.tvPreviewsLoaded=new Set();
+  const tvFrame=walkMaterial(0x252a2e,.32,.58);W.tvScreens=[];W.tvVideoElements={};W.tvVideoTextures={};W.tvPreviewTextures={};
   [['xiem',-5.78,-17.2,Math.PI/2],['xiem',-5.78,-11.2,Math.PI/2],['thanh',5.78,-17.2,-Math.PI/2],['thanh',5.78,-11.2,-Math.PI/2]].forEach(([campaign,x,z,yaw],index)=>{
     const root=new THREE.Group();root.position.set(x,3.15,z);root.rotation.y=yaw;
     const frame=new THREE.Mesh(new THREE.BoxGeometry(2.9,1.72,.16),tvFrame);root.add(frame);
     const screenMat=new THREE.MeshBasicMaterial({map:walkTVTexture(campaign,index),side:THREE.DoubleSide});
     const screen=new THREE.Mesh(new THREE.PlaneGeometry(2.65,1.48),screenMat);screen.position.z=.086;root.add(screen);W.tvScreens.push({campaign,mesh:screen});
-    walkSign('VIDEO SA HÌNH',campaign==='xiem'?'CHIẾN DỊCH QUÂN XIÊM':'CHIẾN DỊCH QUÂN THANH',x,2.12,z,yaw,campaign==='xiem'?'#4a1718':'#273c32',2.45,.44);
+    walkSign('VIDEO SA HÌNH',campaign==='xiem'?'CHIẾN DỊCH QUÂN XIÊM':'CHIẾN DỊCH QUÂN THANH',x,1.68,z,yaw,campaign==='xiem'?'#4a1718':'#273c32',2.45,.44);
     const hit=new THREE.Mesh(new THREE.PlaneGeometry(2.8,1.65),new THREE.MeshBasicMaterial({transparent:true,opacity:.001,side:THREE.DoubleSide,depthWrite:false}));hit.position.copy(root.position);hit.rotation.y=yaw;hit.userData.item={id:'tv-'+campaign+'-'+index,type:'video',title:campaign==='xiem'?'Video sa hình – Kháng chiến chống quân Xiêm':'Video sa hình – Kháng chiến chống quân Thanh',campaign,isVideoScreen:true};W.scene.add(hit);W.targets.push(hit);W.scene.add(root);
   });
 }
 function walkTVTexture(campaign,index){
-  // Load the first frame as a preview; E starts playback with audio.
-  if(W.tvVideoTextures[campaign])return W.tvVideoTextures[campaign];
+  if(W.tvVideoElements[campaign])return W.tvPreviewTextures[campaign]||W.tvVideoTextures[campaign];
   const video=document.createElement('video');
   const file=campaign==='xiem'?'RGXM.mp4':'NH-DD.mp4';
   video.src=new URL(file,location.href).href;
-  video.muted=true;video.defaultMuted=true;video.volume=0;video.loop=true;video.playsInline=true;video.preload='none';
+  video.muted=true;video.defaultMuted=true;video.volume=1;video.loop=true;video.playsInline=true;video.preload='auto';
   video.setAttribute('muted','');video.setAttribute('playsinline','');video.setAttribute('webkit-playsinline','');
   video.style.position='fixed';video.style.width='1px';video.style.height='1px';video.style.opacity='0';video.style.pointerEvents='none';video.style.left='-10px';video.style.top='-10px';
   document.body.appendChild(video);W.tvVideoElements[campaign]=video;
   const tex=new THREE.VideoTexture(video);tex.colorSpace=THREE.SRGBColorSpace;tex.minFilter=THREE.LinearFilter;tex.magFilter=THREE.LinearFilter;
   W.tvVideoTextures[campaign]=tex;
-  video.addEventListener('loadeddata',()=>{tex.needsUpdate=true;},{once:true});
-  video.addEventListener('error',()=>console.error(`Không tải được video ${file} cho TV sa hình.`,video.error),{once:true});
-  return tex;
+  const canvas=document.createElement('canvas');canvas.width=800;canvas.height=450;
+  const context=canvas.getContext('2d');context.fillStyle='#101b18';context.fillRect(0,0,800,450);
+  context.strokeStyle='#c4a463';context.lineWidth=8;context.strokeRect(16,16,768,418);
+  context.fillStyle='#f0d99a';context.textAlign='center';context.font='bold 42px "Be Vietnam Pro",Arial,sans-serif';
+  context.fillText('ĐANG TẢI VIDEO',400,205);
+  context.font='28px "Be Vietnam Pro",Arial,sans-serif';context.fillText(campaign==='xiem'?'RẠCH GẦM – XOÀI MÚT':'NGỌC HỒI – ĐỐNG ĐA',400,258);
+  const preview=new THREE.CanvasTexture(canvas);preview.colorSpace=THREE.SRGBColorSpace;
+  W.tvPreviewTextures[campaign]=preview;
+  video.addEventListener('loadeddata',()=>walkShowTVVideo(campaign),{once:true});
+  video.addEventListener('error',()=>{
+    console.error(`Không tải được video ${file} cho TV sa hình.`,video.error);
+    if(W.active)toast(`Không tải được video ${file}. Kiểm tra tệp và máy chủ.`);
+  },{once:true});
+  return preview;
 }
-function walkPrimeVideoPreviews(campaign){
-  if(!campaign||W.tvPreviewsLoaded.has(campaign))return;
-  const video=W.tvVideoElements[campaign];
-  if(!video)return;
-  W.tvPreviewsLoaded.add(campaign);
-  video.preload='metadata';video.load();
+function walkShowTVVideo(campaign){
+  const video=W.tvVideoElements[campaign],texture=W.tvVideoTextures[campaign];
+  if(!video||!texture||video.readyState<2)return;
+  W.tvScreens.filter(screen=>screen.campaign===campaign).forEach(screen=>{
+    screen.mesh.material.map=texture;screen.mesh.material.needsUpdate=true;
+  });
+  const preview=W.tvPreviewTextures[campaign];
+  if(preview){preview.dispose();delete W.tvPreviewTextures[campaign]}
+}
+function walkStartTVPreviews(){
+  Object.entries(W.tvVideoElements).forEach(([campaign,video])=>{
+    video.muted=true;video.defaultMuted=true;video.volume=1;video.loop=true;video.controls=false;video.preload='auto';
+    if(video.readyState<2)video.load();
+    walkShowTVVideo(campaign);
+    if(!video.paused)return;
+    video.play().then(()=>walkShowTVVideo(campaign)).catch(error=>{
+      if(error.name==='AbortError'&&!video.paused)return;
+      console.error(`Không thể tự phát video ${campaign==='xiem'?'RGXM.mp4':'NH-DD.mp4'} trên TV.`,error);
+      if(W.active)toast(`Không tự phát được video ${campaign==='xiem'?'RGXM.mp4':'NH-DD.mp4'}: ${error.message}`);
+    });
+  });
 }
 function walkUpdateScreen(t){
   if(!W.screenCanvas||typeof filmFrame!=='function')return;
@@ -2604,9 +2838,9 @@ function walkLocationLabel(){
   if(!W.camera)return 'Sảnh trung tâm';const x=W.camera.position.x,z=W.camera.position.z;const r=W.rooms.find(a=>x>=a.minX&&x<=a.maxX&&z>=a.minZ&&z<=a.maxZ);return r?r.label:'Sảnh trung tâm';
 }
 function walkTeleport(id){
-  if(!W.camera)return;const p={gallery:{x:-10.3,z:0,yaw:Math.PI/2},artifacts:{x:10.3,z:0,yaw:-Math.PI/2},battle:{x:0,z:-9.4,yaw:0,pitch:-.36},documents:{x:0,z:10.3,yaw:Math.PI},hall:{x:0,z:2.5,yaw:0}}[id]||{x:0,z:2.5,yaw:0};
+  if(!W.camera)return;const p={gallery:{x:-10.3,z:0,yaw:Math.PI/2},artifacts:{x:10.3,z:0,yaw:-Math.PI/2},battle:{x:0,z:-8.55,yaw:0,pitch:-.36},documents:{x:0,z:10.3,yaw:Math.PI},hall:{x:0,z:2.5,yaw:0}}[id]||{x:0,z:2.5,yaw:0};
   W.camera.position.set(p.x,1.8,p.z);W.velocity.x=0;W.velocity.z=0;W.yaw=p.yaw;W.pitch=p.pitch||0;walkApplyLook();W.current=null;$('#walkStatus').textContent=p.label||WALK_TYPES[id]?.label||'Sảnh trung tâm';$('#walkPrompt').textContent='Hãy quan sát xung quanh, hướng tâm ngắm vào một hiện vật rồi nhấn E.';
-  if(id==='battle')walkPrimeVideoPreviews('xiem');
+  if(id==='battle')walkStartTVPreviews();
 }
 function walkInBounds(x,z){return W.rooms.some(r=>x>=r.minX&&x<=r.maxX&&z>=r.minZ&&z<=r.maxZ);}
 function walkCollision(x,z){const r=.32;return W.solids.some(b=>x+r>b.minX&&x-r<b.maxX&&z+r>b.minZ&&z-r<b.maxZ);}
@@ -2637,7 +2871,6 @@ function walkUpdatePrompt(now){
   const room=walkLocationLabel();
   if(room===WALK_TYPES.gallery.label)walkPrimeGalleryImages();
   if(room===WALK_TYPES.artifacts.label){walkLoadArtifactImages();walkLoadNearbyModels();}
-  if(room===WALK_TYPES.battle.label)walkPrimeVideoPreviews(W.camera.position.x<0?'xiem':'thanh');
   if(now-W.promptAt<50)return;W.promptAt=now;
   const hit=walkFindHit();W.current=hit?hit.item:null;
   const prompt=hit?'E / nhấp chuột  ·  '+hit.item.title+'  ·  '+(hit.item.isVideoScreen?'Phát video':'Mở thuyết minh'):document.pointerLockElement===$('#walkCanvas')?'Di chuyển bằng WASD · Ngắm vào vật thể để tương tác':'Nhấp vào cảnh 3D để bật điều khiển góc nhìn';
@@ -2667,9 +2900,8 @@ function walkPlayCampaignVideo(campaign){
   const video=W.tvVideoElements[campaign];
   if(!video){toast('Không tìm thấy video cho màn chiếu này.');return;}
   Object.entries(W.tvVideoElements).forEach(([id,other])=>{if(id!==campaign){other.pause();other.muted=true;}});
-  video.muted=false;video.volume=USER_PREFS.volume;
+  video.muted=false;video.volume=USER_PREFS.volume;video.loop=false;video.controls=true;video.preload='auto';
   if(video.readyState>=1)video.currentTime=0;
-  video.controls=true;video.preload='auto';video.loop=false;video.playsInline=true;
   video.style.position='relative';video.style.display='block';video.style.width='100%';video.style.height='auto';video.style.maxWidth='100%';video.style.maxHeight='52vh';
   video.style.opacity='1';video.style.pointerEvents='auto';video.style.left='auto';video.style.top='auto';video.style.background='#000';video.style.borderRadius='10px';
   const label=campaign==='xiem'?'chiến dịch quân Xiêm':'chiến dịch quân Thanh';
@@ -2677,7 +2909,7 @@ function walkPlayCampaignVideo(campaign){
   content.innerHTML=`<span class="badge">📺 TV sa hình</span><h2>Video sa hình – Kháng chiến chống ${campaign==='xiem'?'quân Xiêm':'quân Thanh'}</h2><p class="meta">Video tư liệu cho ${label}</p><div class="walk-active-video" id="walkActiveVideo"></div><p class="walk-video-error" id="walkVideoError" role="status" hidden></p><div class="actions"><button class="primary" id="walkVideoPlay" type="button">▶ Phát video</button><button id="walkDetailClose2" type="button">Đóng video</button></div>`;
   content.querySelector('#walkActiveVideo').append(video);
   $('#walkDetail').hidden=false;
-  video.addEventListener('error',()=>walkReportVideoError(video,campaign),{once:true});
+  video.onerror=()=>walkReportVideoError(video,campaign);
   $('#walkDetailClose2').onclick=walkCloseDetail;
   $('#walkDetailClose').onclick=walkCloseDetail;
   $('#walkVideoPlay').onclick=()=>walkStartCampaignVideo(video,campaign);
@@ -2690,14 +2922,15 @@ function walkStartCampaignVideo(video,campaign){
   const play=video.play();
   if(!play||!play.then)return;
   play.then(()=>{
-    $('#walkVideoError').hidden=true;
-    $('#walkVideoPlay').hidden=true;
+    const error=$('#walkVideoError'),button=$('#walkVideoPlay');
+    if(error)error.hidden=true;
+    if(button)button.hidden=true;
     toast(`Đang phát video chiến dịch quân ${campaign==='xiem'?'Xiêm':'Thanh'}.`);
   }).catch(error=>{
     if(error.name==='AbortError'&&!video.paused)return;
-    $('#walkVideoPlay').hidden=false;
-    $('#walkVideoError').hidden=false;
-    $('#walkVideoError').textContent=`Không tự phát được video. Nhấn “Phát video” để thử lại. ${error.message}`;
+    const button=$('#walkVideoPlay'),status=$('#walkVideoError');
+    if(button)button.hidden=false;
+    if(status){status.hidden=false;status.textContent=`Không tự phát được video. Nhấn “Phát video” để thử lại. ${error.message}`}
     console.error(`Không phát được video chiến dịch ${campaign}.`,error);
   });
 }
@@ -2710,16 +2943,33 @@ function walkReportVideoError(video,campaign){
   if(status){status.hidden=false;status.textContent=message}
   else toast(message);
 }
-function walkCloseDetail(){
+function walkCloseDetail(resumeTV=true){
   const activeVideo=$('#walkActiveVideo video');
   if(activeVideo){
-    activeVideo.pause();activeVideo.controls=false;activeVideo.muted=true;
-    activeVideo.loop=true;activeVideo.preload='metadata';activeVideo.style.position='fixed';activeVideo.style.display='';activeVideo.style.width='1px';activeVideo.style.height='1px';activeVideo.style.maxWidth='';activeVideo.style.maxHeight='';
+    activeVideo.pause();activeVideo.controls=false;activeVideo.muted=true;activeVideo.defaultMuted=true;activeVideo.loop=true;activeVideo.preload='auto';
+    activeVideo.style.position='fixed';activeVideo.style.display='';activeVideo.style.width='1px';activeVideo.style.height='1px';activeVideo.style.maxWidth='';activeVideo.style.maxHeight='';
     activeVideo.style.opacity='0';activeVideo.style.pointerEvents='none';activeVideo.style.left='-10px';activeVideo.style.top='-10px';activeVideo.style.background='';activeVideo.style.borderRadius='';
     document.body.append(activeVideo);
   }
   $('#walkDetailContent').querySelectorAll('video').forEach(video=>video.pause());
   $('#walkDetail').hidden=true;
+  if(resumeTV&&W.active)walkStartTVPreviews();
+}
+function walkRefreshItem(it){
+  W.targets.forEach(target=>{
+    if(target.userData.item?.id!==it.id)return;
+    target.userData.item=it;
+    target.traverse(mesh=>{
+      if(mesh.userData.galleryArtwork){
+        const material=mesh.material,previous=material.map;
+        material.map=walkTextureForItem(it);material.needsUpdate=true;previous?.dispose();
+      }else if(mesh.userData.galleryLabel){
+        const material=mesh.material,previous=material.map;
+        material.map=walkLabelTexture(it.title,it.date||'TƯ LIỆU TRƯNG BÀY','#362018');material.needsUpdate=true;previous?.dispose();
+      }
+    });
+  });
+  if(W.current?.id===it.id&&!$('#walkDetail').hidden)walkOpenItem(it);
 }
 function walkOpenItem(it){
   if(!it)return;W.current=it;
@@ -2730,8 +2980,22 @@ function walkOpenItem(it){
   const resourcePanel=it.isResourceCabinet?`<section class="walk-resource-list"><p>Chọn tài liệu bên dưới để tải về thiết bị.</p>${(S.resources||[]).length?(S.resources||[]).map((f,i)=>`<div class="resource-file"><span class="resource-file-type">📄</span><span class="resource-file-name">${esc(f.name)}<small>${esc(f.path||f.name)}</small></span><button class="primary" type="button" data-walk-resource-download="${i}">⬇ Tải xuống</button></div>`).join(''):'<p class="resource-empty">Hiện chưa có tài liệu. Ban quản lý có thể thêm đường dẫn trong mục “Quản lý bảo tàng” → “Tải tài liệu”.</p>'}</section>`:'';
   const videos=it.isVideoScreen?(S.videos||[]).filter(v=>v.campaign===(it.campaign||'xiem')):[];
   const videoPanel=it.isVideoScreen?`<section class="walk-video-list"><p>Video cho chiến dịch này:</p>${videos.length?videos.map(v=>`<div class="resource-file"><span class="resource-file-type">🎬</span><span class="resource-file-name">${esc(v.name)}<small>${esc(v.path||v.name)}</small></span><button class="primary" type="button" data-play-video="${esc(v.id)}">▶ Phát video</button></div>`).join(''):'<p class="resource-empty">Chưa có video bổ sung. Có thể thêm đường dẫn tại Quản lý bảo tàng → Tải tài liệu.</p>'}<div id="walkVideoPlayer"></div></section>`:'';
-  $('#walkDetailContent').innerHTML=`<span class="badge">${it.isVideoScreen?'📺':type.icon} ${esc(it.isVideoScreen?'TV sa hình':type.label)}</span><h2>${esc(it.title)}</h2><p class="meta">${esc([it.date,it.origin].filter(Boolean).join(' · '))}</p>${image}<div class="body">${paragraphs|| (it.isResourceCabinet||it.isVideoScreen?'': '<p>Chưa có nội dung mô tả cho hiện vật này.</p>')}</div>${resourcePanel}${videoPanel}${it.question?`<div class="question"><b>Câu hỏi suy ngẫm</b><p>${esc(it.question)}</p></div>`:''}<div class="actions">${it.isResourceCabinet||it.isVideoScreen?'': '<button class="primary" id="walkSpeak">🔊 Nghe thuyết minh</button>'}${['sahinh','phim'].includes(it.type)?'<button class="primary" id="walkReplay">▶ Tái hiện trận đánh</button>':''}<button id="walkDetailClose2">Đóng thông tin</button></div>`;
+  $('#walkDetailContent').innerHTML=`<span class="badge">${it.isVideoScreen?'📺':type.icon} ${esc(it.isVideoScreen?'TV sa hình':type.label)}</span><h2>${esc(it.title)}</h2><p class="meta">${esc([it.date,it.origin].filter(Boolean).join(' · '))}</p>${image}<div class="body">${paragraphs|| (it.isResourceCabinet||it.isVideoScreen?'': '<p>Chưa có nội dung mô tả cho hiện vật này.</p>')}</div>${resourcePanel}${videoPanel}${it.question?`<div class="question"><b>Câu hỏi suy ngẫm</b><p>${esc(it.question)}</p></div>`:''}<div class="actions">${it.isResourceCabinet||it.isVideoScreen?'': '<button class="primary" id="walkSpeak">🔊 Nghe thuyết minh</button>'}${['sahinh','phim'].includes(it.type)?'<button class="primary" id="walkReplay">▶ Tái hiện trận đánh</button>':''}${it.isResourceCabinet||it.isVideoScreen?'':'<button class="primary" id="walkEditItem">✎ Chỉnh sửa hiện vật</button>'}<button id="walkDetailClose2">Đóng thông tin</button></div>`;
+  const detailImage=$('#walkDetailContent .mini-art img');
+  if(detailImage){
+    detailImage.loading='eager';
+    detailImage.decoding='async';
+    detailImage.addEventListener('error',()=>{
+      console.error(`Không tải được ảnh "${it.img}" của hiện vật "${it.title}".`);
+      const fallback=document.createElement('p');
+      fallback.className='walk-image-error';
+      fallback.textContent=`Không tải được ảnh “${it.title}”. Hãy kiểm tra tệp ${it.img}.`;
+      detailImage.replaceWith(fallback);
+    },{once:true});
+  }
   $('#walkDetail').hidden=false;$('#walkDetailClose2').onclick=walkCloseDetail;
+  const editButton=$('#walkEditItem');
+  if(editButton)editButton.onclick=()=>openEditor(it.id);
   $('#walkDetailContent').querySelectorAll('[data-walk-resource-download]').forEach(btn=>btn.addEventListener('click',()=>downloadSavedResource((S.resources||[])[Number(btn.dataset.walkResourceDownload)])));
   $('#walkDetailContent').querySelectorAll('[data-play-video]').forEach(btn=>btn.addEventListener('click',()=>{const v=(S.videos||[]).find(x=>x.id===btn.dataset.playVideo);if(!v)return;const src=v.path?assetHref(v.path):(v.url||v.dataURL);if(!src){toast('Video này chưa có đường dẫn tệp.');return}const host=$('#walkVideoPlayer');host.innerHTML=`<video controls autoplay playsinline style="width:100%;max-height:42vh;background:#000;border-radius:10px" src="${esc(src)}"></video>`;const video=host.querySelector('video');video.volume=USER_PREFS.volume;const texture=new THREE.VideoTexture(video);texture.colorSpace=THREE.SRGBColorSpace;(W.tvScreens||[]).filter(screen=>screen.campaign===v.campaign).forEach(screen=>{screen.mesh.material.map=texture;screen.mesh.material.needsUpdate=true;});video.play().catch(error=>toast(`Không phát được video: ${error.message}`));}));
   if(document.pointerLockElement===$('#walkCanvas'))document.exitPointerLock?.();
